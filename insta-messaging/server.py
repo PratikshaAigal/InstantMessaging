@@ -2,11 +2,12 @@ import socket
 import threading
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives.keywrap import aes_key_wrap, aes_key_unwrap
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import serialization
 import os
 import pickle
+import base64
+import sqlite3
+from contextlib import closing
 
 class Server:
     def __init__(self, host='127.0.0.1', port=12345):
@@ -32,29 +33,49 @@ class Server:
                 self.register_client(client_socket, request)
             elif request["type"] == "session_request":
                 self.create_session(client_socket, request)
+            elif request["type"] == "list_clients":
+                self.list_clients(client_socket)
             # Add more request handlers as needed
         except Exception as e:
             print(f"Error: {e}")
         finally:
             client_socket.close()
 
+    def list_clients(self, conn):
+        client_list = list(self.clients.keys())  # Retrieve usernames of all registered clients
+        response = {"status": "success", "clients": client_list}
+        conn.send(pickle.dumps(response))
+        print("Sent list of clients.")
+
     def register_client(self, client_socket, request):
         username = request["username"]
-        public_key = request["public_key"]
+        public_key_base64 = request["public_key"]
+        client_address = client_socket.getpeername()
+        address_str = f"{client_address[0]}:{client_address[1]}"
+
+        # Convert base64 back to PEM
+        public_key_pem = base64.b64decode(public_key_base64).decode('utf-8')
+        # Load the public key
+        public_key = serialization.load_pem_public_key(public_key_pem.encode('utf-8'))
+
         with self.lock:
             if username not in self.clients:
                 self.clients[username] = {
                     "public_key": public_key,
-                    "state": "idle"
+                    "state": "idle",
+                    "address": address_str
                 }
                 response = {"status": "success"}
             else:
                 response = {"status": "error", "message": "Username already exists"}
         client_socket.send(pickle.dumps(response))
 
+
+
     def create_session(self, client_socket, request):
         initiator = request["initiator"]
         target = request["target"]
+
         with self.lock:
             if self.clients.get(target, {}).get("state") == "idle":
                 session_key = os.urandom(32)  # Generate a secure session key
@@ -73,8 +94,13 @@ class Server:
                 response = {
                     "status": "success",
                     "session_ticket_initiator": session_ticket_initiator,
-                    "session_ticket_target": session_ticket_target
+                    "session_ticket_target": session_ticket_target,
+                    "peer_address": self.clients[target]["address"]
                 }
             else:
                 response = {"status": "error", "message": "Target is not idle"}
         client_socket.send(pickle.dumps(response))
+
+if __name__ == "__main__":
+    server = Server()
+    server.start()
