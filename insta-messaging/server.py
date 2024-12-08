@@ -1,80 +1,148 @@
 import socket
 import threading
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives.keywrap import aes_key_wrap, aes_key_unwrap
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-import os
 import pickle
 
-class Server:
-    def __init__(self, host='127.0.0.1', port=12345):
-        self.host = host
-        self.port = port
-        self.clients = {}  # Stores client states and public keys
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.lock = threading.Lock()
+clients = {}  # Stores active clients as {username: (socket, state)}
+sessions = {}  # Active sessions {initiator: target}
 
-    def start(self):
-        self.server_socket.bind((self.host, self.port))
-        self.server_socket.listen(5)
-        print(f"Server running on {self.host}:{self.port}")
-        while True:
-            client_socket, addr = self.server_socket.accept()
-            threading.Thread(target=self.handle_client, args=(client_socket,)).start()
 
-    def handle_client(self, client_socket):
+def handle_client(client_socket, username):
+    while True:
         try:
-            data = client_socket.recv(4096)
-            request = pickle.loads(data)
-            if request["type"] == "register":
-                self.register_client(client_socket, request)
-            elif request["type"] == "session_request":
-                self.create_session(client_socket, request)
-            # Add more request handlers as needed
+            data = pickle.loads(client_socket.recv(4096))
+            if not data:
+                break
+
+            # Handle different types of client requests
+            if data["type"] == "list_clients":
+                available_clients = [
+                    f"{client} ({state})"
+                    for client, (_, state) in clients.items()
+                    if client != username
+                ]
+                client_socket.send(
+                    pickle.dumps({"type": "client_list", "clients": available_clients})
+                )
+
+            elif data["type"] == "initiate_session":
+                target = data["target"]
+                if target in clients and clients[target][1] == "Idle":
+                    # Mark both clients as busy
+                    clients[username] = (client_socket, "Busy")
+                    clients[target] = (clients[target][0], "Busy")
+                    sessions[username] = target
+                    sessions[target] = username
+
+                    # Notify both clients
+                    clients[target][0].send(
+                        pickle.dumps(
+                            {"type": "session_notification", "initiator": username}
+                        )
+                    )
+                    client_socket.send(
+                        pickle.dumps({"type": "session_confirmed", "target": target})
+                    )
+                    print(f"Session established between {username} and {target}.")
+                else:
+                    client_socket.send(
+                        pickle.dumps(
+                            {"type": "error", "message": "Target is not available."}
+                        )
+                    )
+
+            elif data["type"] == "send_message":
+                target = sessions.get(username)
+                if target and target in clients:
+                    clients[target][0].send(
+                        pickle.dumps(
+                            {
+                                "type": "new_message",
+                                "sender": username,
+                                "message": data["message"],
+                            }
+                        )
+                    )
+                    print(f"{username} to {target}: {data['message']}")
+                else:
+                    client_socket.send(
+                        pickle.dumps(
+                            {"type": "error", "message": "No active session."}
+                        )
+                    )
+
+            elif data["type"] == "end_session":
+                target = sessions.pop(username, None)
+                if target:
+                    sessions.pop(target, None)
+                    # Mark both clients as idle
+                    clients[username] = (client_socket, "Idle")
+                    clients[target] = (clients[target][0], "Idle")
+                    clients[target][0].send(
+                        pickle.dumps(
+                            {"type": "session_ended", "message": f"{username} ended the session."}
+                        )
+                    )
+                    client_socket.send(
+                        pickle.dumps(
+                            {"type": "session_ended", "message": f"Session with {target} ended."}
+                        )
+                    )
+                    print(f"Session ended between {username} and {target}.")
+                else:
+                    client_socket.send(
+                        pickle.dumps(
+                            {"type": "error", "message": "No active session to end."}
+                        )
+                    )
+
         except Exception as e:
-            print(f"Error: {e}")
-        finally:
-            client_socket.close()
+            print(f"Error handling client {username}: {e}")
+            break
 
-    def register_client(self, client_socket, request):
-        username = request["username"]
-        public_key = request["public_key"]
-        with self.lock:
-            if username not in self.clients:
-                self.clients[username] = {
-                    "public_key": public_key,
-                    "state": "idle"
-                }
-                response = {"status": "success"}
-            else:
-                response = {"status": "error", "message": "Username already exists"}
-        client_socket.send(pickle.dumps(response))
+    # Cleanup on client disconnect
+    clients.pop(username, None)
+    target = sessions.pop(username, None)
+    if target:
+        sessions.pop(target, None)
+        clients[target] = (clients[target][0], "Idle")
+        clients[target][0].send(
+            pickle.dumps(
+                {"type": "session_ended", "message": f"{username} disconnected."}
+            )
+        )
+    client_socket.close()
+    print(f"Client {username} disconnected.")
 
-    def create_session(self, client_socket, request):
-        initiator = request["initiator"]
-        target = request["target"]
-        with self.lock:
-            if self.clients.get(target, {}).get("state") == "idle":
-                session_key = os.urandom(32)  # Generate a secure session key
-                initiator_key = self.clients[initiator]["public_key"]
-                target_key = self.clients[target]["public_key"]
-                session_ticket_initiator = initiator_key.encrypt(
-                    session_key,
-                    padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
+
+def main():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 12345))
+    server.listen(5)
+    print("Server running on 127.0.0.1:12345")
+
+    while True:
+        client_socket, addr = server.accept()
+        try:
+            credentials = pickle.loads(client_socket.recv(4096))
+            username = credentials["username"]
+
+            if username in clients:
+                client_socket.send(
+                    pickle.dumps(
+                        {"type": "error", "message": "Username already taken."}
+                    )
                 )
-                session_ticket_target = target_key.encrypt(
-                    session_key,
-                    padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
-                )
-                self.clients[initiator]["state"] = "busy"
-                self.clients[target]["state"] = "busy"
-                response = {
-                    "status": "success",
-                    "session_ticket_initiator": session_ticket_initiator,
-                    "session_ticket_target": session_ticket_target
-                }
+                client_socket.close()
             else:
-                response = {"status": "error", "message": "Target is not idle"}
-        client_socket.send(pickle.dumps(response))
+                clients[username] = (client_socket, "Idle")
+                client_socket.send(
+                    pickle.dumps({"type": "welcome", "message": f"Welcome, {username}!"})
+                )
+                print(f"Client {username} registered.")
+                threading.Thread(target=handle_client, args=(client_socket, username)).start()
+        except Exception as e:
+            print(f"Error during client registration: {e}")
+
+
+if __name__ == "__main__":
+    main()
