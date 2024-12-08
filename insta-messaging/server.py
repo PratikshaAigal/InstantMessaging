@@ -1,13 +1,13 @@
 import socket
 import threading
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
-from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives import serialization
 import os
 import pickle
 import base64
-import sqlite3
-from contextlib import closing
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives import hashes
+from cryptography.exceptions import InvalidSignature
+
 
 class Server:
     def __init__(self, host='127.0.0.1', port=4000):
@@ -31,10 +31,18 @@ class Server:
             request = pickle.loads(data)
             if request["type"] == "register":
                 self.register_client(client_socket, request)
+            if request["type"] == "login":
+                self.login(client_socket, request)
+            if request["type"] == "challenge_reply":
+                self.verify_login(client_socket, request)
             elif request["type"] == "session_request":
                 self.create_session(client_socket, request)
             elif request["type"] == "list_clients":
                 self.list_clients(client_socket)
+            elif request["type"] == "close_session":
+                self.close_session(client_socket, request)
+            elif request["type"] == "logout":
+                self.client_logoff(client_socket, request)
             # Add more request handlers as needed
         except Exception as e:
             print(f"Error: {e}")
@@ -64,14 +72,60 @@ class Server:
                 self.clients[username] = {
                     "public_key": public_key,
                     "state": "idle",
-                    "address": address_str
+                    "address": address_str,
+                    "active": True
                 }
                 response = {"status": "success"}
             else:
                 response = {"status": "error", "message": "Username already exists"}
         client_socket.send(pickle.dumps(response))
 
+    def login(self, client_socket, request):
+        username = request["username"]
+        with self.lock:
+            if username in self.clients:
+                challenge = os.urandom(32)
+                # Save the challenge in user data
+                self.clients[username]["challenge"] = challenge
 
+                # Send a challenge to client
+                response = {"status": "success", "challenge": challenge}
+
+            else:
+                response = {"status": "error", "message": "Username does not exists"}
+        client_socket.send(pickle.dumps(response))
+
+    def verify_login(self, client_socket, request):
+        username = request["username"]
+        signed_challenge = request["signed_challenge"]
+        client_address = client_socket.getpeername()
+        listen_port = request["listen_port"]
+        address_str = f"{client_address[0]}:{listen_port}"
+
+        with self.lock:
+            if username in self.clients:
+                user_public_key = self.clients[username]["public_key"]
+                # Verify the signed challenge using the client's public key
+                try:
+                    user_public_key.verify(
+                        signed_challenge,
+                        self.clients[username].get("challenge"), #challenge sent
+                        padding.PSS(
+                            mgf=padding.MGF1(hashes.SHA256()),
+                            salt_length=padding.PSS.MAX_LENGTH
+                        ),
+                        hashes.SHA256()
+                    )
+                    self.clients[username]["state"] = 'idle'
+                    self.clients[username]["address"] = address_str
+                    self.clients[username]["active"] = True
+                    res = {"status": "success", "message": "Login successful"}
+                except InvalidSignature:
+                    res = {"status": "error", "message": "Invalid signature"}
+            else:
+                res = {"status": "error", "message": "Username does not exists"}
+
+        client_socket.send(pickle.dumps(res))
 
     def create_session(self, client_socket, request):
         initiator = request["initiator"]
@@ -101,6 +155,28 @@ class Server:
             else:
                 response = {"status": "error", "message": "Target is not idle"}
         client_socket.send(pickle.dumps(response))
+
+    def close_session(self, client_socket, request):
+        user = request["username"]
+        res = {"status": "error"}
+
+        with self.lock:
+            self.clients[user]["state"] = "idle"
+            res = {"status": "success"}
+
+        client_socket.send(pickle.dumps(res))
+
+    def client_logoff(self, client_socket, request):
+        user = request["username"]
+        res = {"status": "error"}
+
+        with self.lock:
+            self.clients[user]["state"] = "idle"
+            self.clients[user]["active"] = False
+            res = {"status": "success"}
+
+        client_socket.send(pickle.dumps(res))
+
 
 if __name__ == "__main__":
     server = Server()
