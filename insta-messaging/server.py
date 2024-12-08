@@ -10,7 +10,7 @@ import sqlite3
 from contextlib import closing
 
 class Server:
-    def __init__(self, host='127.0.0.1', port=12345):
+    def __init__(self, host='127.0.0.1', port=4000):
         self.host = host
         self.port = port
         self.clients = {}  # Stores client states and public keys
@@ -51,7 +51,8 @@ class Server:
         username = request["username"]
         public_key_base64 = request["public_key"]
         client_address = client_socket.getpeername()
-        address_str = f"{client_address[0]}:{client_address[1]}"
+        listen_port = request["listen_port"]
+        address_str = f"{client_address[0]}:{listen_port}"
 
         # Convert base64 back to PEM
         public_key_pem = base64.b64decode(public_key_base64).decode('utf-8')
