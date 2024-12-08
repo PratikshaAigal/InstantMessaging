@@ -59,3 +59,7 @@ An exisiting user can join the network as follows:
 3. Enter the same private key file name that was used to login. If you have the change the key file, press enter the script the will look for deafult `private_key.pem` file in the current folder.
 
 ![img_4.png](img_4.png)
+
+# How to Generate Keys
+If you want to manually generate the keys, you can use the bleow script:
+`python generate_keys.py`
