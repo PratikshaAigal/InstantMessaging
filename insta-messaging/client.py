@@ -18,17 +18,24 @@ RESET = "\x1b[0m"  # Reset formatting
 
 
 def format_chatbot_text_left(text, width=100):
+    """
+        Format text for left-aligned chatbot messages.
+    """
     left_padding = (width - len(text)) // 2
     right_padding = width - len(text) - left_padding
     return f"{LEFT_INDENT}{' ' * left_padding}{text}{' ' * right_padding}{RESET}"
 
 
 def format_chatbot_text_right(text, width=100):
+    """
+        Format text for right-aligned chatbot messages.
+    """
     right_padding = (width - len(text)) // 2
     left_padding = width - len(text) - right_padding
     return f"{RIGHT_INDENT}{text}{' ' * right_padding}{RESET}"
 
 def generate_nonce(length=16):
+    # Generate a secure random nonce
     return os.urandom(length).hex()  # Hex-encoded nonce for transmission
 
 def decrement_nonce(nonce_hex: str) -> str:
@@ -55,10 +62,18 @@ class Client:
         # Create and bind a single socket for both listening
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.bind((self.server_host, 0))  # Bind to any available port
-        self.listen_port = self.socket.getsockname()[1]
+        self.listen_port = self.socket.getsockname()[1] # Save the port to share with other clients
         self.session_active = False
 
+        # Shared variables for thread handling 
+        self.stop_event = threading.Event()
+
     def register(self):
+        """
+        Register the user with the server by sending:
+        - Public key (Base64-encoded)
+        - Listening port
+        """
         # Convert public key to PEM format and base64 encode it
         public_key_pem = self.public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
         public_key_base64 = base64.b64encode(public_key_pem).decode('utf-8')
@@ -77,6 +92,9 @@ class Client:
         return True
 
     def login(self):
+        """
+            Login to the server by responding to a cryptographic challenge.
+        """
         # Prepare the login request
         request = {
             "type": "login",
@@ -117,7 +135,11 @@ class Client:
         return False  # Login failed
 
     def initiate_session(self, target):
-        nonce = generate_nonce()
+        """
+            Initiate a secure session with another client.
+        """
+        # Send session request to server
+        nonce = generate_nonce() # Include nonce to for freshness
         request = {
             "type": "session_request",
             "initiator": self.username,
@@ -140,8 +162,8 @@ class Client:
             )
             # Deserialize the ticket to extract its contents
             ticket_data = pickle.loads(decrypted_ticket)
-            self.session_key = ticket_data.get("session_key")
-            nonce_rcvd = ticket_data.get("nonce")
+            self.session_key = ticket_data.get("session_key") # session key
+            nonce_rcvd = ticket_data.get("nonce") # nonce sent by server to verify itself
 
             if nonce_rcvd != nonce:
                 print("Nonce dont match, server potentially compromised!, Exiting...")
@@ -151,14 +173,18 @@ class Client:
             self.peer_host, self.peer_port = response["peer_address"].split(":")
             self.peer_port = int(self.peer_port)
 
+            # Forward the targets ticket and return the socket if connection established
             peer_socket = self.forward_ticket_to_target(ticket_to_target, target, nonce)
             return peer_socket
-            print(f"Session established successfully with {target}")
-            # threading.Thread(target=self.listen_for_messages).start()
+
         else:
             print(f"Session initiation failed: {response['message']}")
 
     def close_session(self):
+        """
+            Close the session and notify the server
+        """
+        # Send request type close_session with username
         request = {
             "type": "close_session",
             "username": self.username,
@@ -172,6 +198,10 @@ class Client:
         return False
 
     def logout(self):
+        """
+            Close the session and notify the server to mark this client as inactive(i.e cannot take any request)
+        """
+        # First close the existing session and then logout
         if self.close_session():
             request = {
                 "type": "logout",
@@ -188,10 +218,7 @@ class Client:
     def forward_ticket_to_target(self, ticket_to_target, target_user, nonce):
         """Send the session ticket to the target client."""
         try:
-            # Assuming the server maintains information about target clients' address/port
-            # target_address = (self.peer_host, self.peer_port)
-            # self.socket.connect(target_address)
-            # Create a message holding username, nonce and listening port
+           # request to peer contains username, nonce , its listening port and its ticket from server
             data = {
                 "listening_port": self.listen_port,
                 "user": self.username,
@@ -211,9 +238,10 @@ class Client:
             if response["status"] == "success":
                 print(f"Ticket forwarded to {target_user} successfully.")
 
-                #Fetch the verification from targer
+                # Fetch the verification from target
                 nonce_rcv = response["verification_nonce"]
                 decrypted_nonce = decrypt_message_with_iv(self.session_key, nonce_rcv).hex()
+                # If peer is verified the session is established
                 if decrement_nonce(nonce) == decrypted_nonce:
                     return peer_socket
                 else:
@@ -246,13 +274,15 @@ class Client:
                 # Handle ticket forwarding
                 print(f"Received ticket from {addr}")
 
+                # Verify the ticket and accept connection
                 verified, sender = self.process_ticket(request, peer_socket, addr)
+
                 # If ticket is verified enter the chat
                 if verified:
                     # Start threads for receiving and sending messages
                     print(
                         f"Session active with {sender} ({self.peer_host}:{self.peer_port}). (Enter your message or press 9 to exit)")
-                    print("Please press 0 to continue")
+                    print("Please press 0 to continue") # to discard the data from main menu thread
                     self.session_active = True
 
                     receive_thread = threading.Thread(target=self.receive_messages, args=(peer_socket, sender))
@@ -297,19 +327,17 @@ class Client:
             nonce_in_request = decrypted_message["nonce"]
             sender = decrypted_message["user"]
 
+            # If the nonce or username dont match close the connection
             if (sender != initiator) and (nonce_in_ticket != nonce_in_request):
                 peer_socket.send(pickle.dumps({"status": "error"}))
-                return False
+                return False, None
 
-            # self.session_key = self.private_key.decrypt(
-            #     ticket,
-            #     padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
-            # )
-            # Update the addr as its peer addr as peer address
+
+            # Update the addr as its peer host and update the listening port
             self.peer_host = addr[0]
             self.peer_port = decrypted_message["listening_port"]
 
-            # Step 3: Send decremented nonce by 1 encrypt it and send back to verify yourself
+            # Step 3:  decremented nonce by 1, encrypt it and send back to verify yourself
             verfication_nonce = decrement_nonce(nonce_in_ticket)
             encrypted_nonce = encrypted_message_with_iv(self.session_key, bytes.fromhex(verfication_nonce))
 
@@ -323,6 +351,7 @@ class Client:
     def close_connection(self, peer_socket):
         """Close the current session and clean up resources."""
         if self.session_key:
+            # Notifiy server
             if self.close_session():
                 print("Closing current session...")
                 self.session_key = None
@@ -336,7 +365,14 @@ class Client:
         else:
             print("No active session to close.")
 
+        # signal send and receive message threads to stop
+        self.stop_event.set() 
+
+
     def send_request(self, request):
+        """
+        Function to send request to server
+        """
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
             client_socket.connect((self.server_host, self.server_port))
             client_socket.send(pickle.dumps(request))
@@ -344,43 +380,30 @@ class Client:
         return pickle.loads(response)
 
     def connect_to_peer(self, req):
+        """
+         Function to send message to peer
+        """
         peer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         peer_socket.connect((self.peer_host, self.peer_port))
         peer_socket.send(pickle.dumps(req))
         res = peer_socket.recv(4096)
         return pickle.loads(res), peer_socket
 
-    # def send_message(self, message):
-    #     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
-    #         if self.peer_host and self.peer_port:
-    #             client_socket.connect((self.peer_host, self.peer_port))
-    #             encrypted_message = encrypted_message_with_iv(self.session_key, message)
-    #             client_socket.send(encrypted_message)
-    #             print("Message sent.")
-    #         else:
-    #             print("No active session.")
-
     def send_message(self, message, socket):
+        """
+        Encrypt and send message to peer
+        """
         try:
             encrypted_message = encrypted_message_with_iv(self.session_key, message)
             socket.send(encrypted_message)
         except Exception as e:
             print(f"Failed to send the message: {e}")
 
-    # def enter_chat_session(self):
-    #     """Handle sending messages while continuously listening for incoming ones."""
-    #     print(f"Session active with {self.peer_host}:{self.peer_port}.")
-    #     send_thread = threading.Thread(target=self.enter_chat, daemon=True)
-    #     send_thread.start()
-    #
-    #     while send_thread.is_alive():
-    #         # Main thread can perform other tasks or just wait
-    #         send_thread.join(timeout=0.1)
 
     def send_messages(self, peer_socket):
-        """Threaded method to handle sending messages."""
+        """Threaded method to handle sending messages in session."""
         # print("Enter your message or press 9 to exit the chat")
-        while True:
+        while not self.stop_event.is_set():  # Check if stop_event is set:
             message = input()
             self.send_message(message.strip().encode('utf-8'), peer_socket)
             # Can print the input again but was repeated on console
@@ -393,11 +416,13 @@ class Client:
         self.close_connection(peer_socket)
 
     def receive_messages(self, peer_socket, sender):
-        while True:
+        """Threaded method to handle new incoming messages in session."""
+        while not self.stop_event.is_set():  # Check if stop_event is set:
             try:
                 encrypted_message = peer_socket.recv(1024)
                 message = decrypt_message_with_iv(self.session_key, encrypted_message).decode('utf-8')
-                if message == '0':
+                # Close the connection if peer closes it
+                if message == '9':
                     print("Connection closed by the other client.")
                     break
 
@@ -410,11 +435,18 @@ class Client:
         self.close_connection(peer_socket)
 
     def start_session(self):
+        """
+        Initiate a session with other client
+        """
         target = input("Enter the username of the client to initiate a session with: ")
+
+        # Request server for session key and open socket
         peer_socket = self.initiate_session(target)
 
-        if not self.session_key:
+        # If the connection is not established clean the resources
+        if not self.session_key or not peer_socket:
             print("Session initiation failed. Try again or select another option.")
+            self.close_session()
             return
         else:
             # Start threads for receiving and sending messages
@@ -431,15 +463,12 @@ class Client:
             send_thread.join()
 
 
-# def get_random_open_port():
-#     while True:
-#         port = random.randint(49152, 65535)
-#         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-#             if s.connect_ex(('localhost', port)) != 0:  # Port is not in use
-#                 return port
-
 
 def get_key_files(private_key_file="private_key.pem", generate=False):
+    """
+    Utility function to generate or read RSA key files
+    """
+
     if not private_key_file:
         private_key_file = "private_key.pem"
     private_key = None
@@ -456,14 +485,16 @@ def get_key_files(private_key_file="private_key.pem", generate=False):
         except Exception as e:
             print(f"Error fetching the key: {e}")
     else:
-        # genereate new keys
+        # generate new keys
         private_key = generate_rsa_keypair()
 
     return private_key
 
 
 def register_or_login():
-    client = None
+    """
+    Register or Login to server
+    """
     print("Enter \n 1: Register \n 2:Login")
     choice = input()
     if choice == "1":
@@ -484,6 +515,7 @@ def register_or_login():
             client.username = username
             client.register()
     elif choice == "2":
+        # Existing user, can log in
         username = input("Enter your username: ")
         filename = input(f"Enter your private key file name or press Enter to use default: ")
         key = get_key_files(filename)
@@ -505,18 +537,19 @@ def register_or_login():
 
 
 if __name__ == "__main__":
-
+    # Create a client object
     client = register_or_login()
 
     # Start a thread to listen for incoming messages
     listening_thread = threading.Thread(target=client.listen_for_messages, daemon=True)
     listening_thread.start()
 
-    time.sleep(2)
-
     # Start the main thread
     while True:
-        # If a session is active, go to sleep
+        # If a session is on going pause the main thread
+        while client.session_active:
+            time.sleep(5)
+
         print("\n--- Menu ---")
         print("1. Start a new session")
         print("2. List available clients")

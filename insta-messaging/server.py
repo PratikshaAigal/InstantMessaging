@@ -18,6 +18,9 @@ class Server:
         self.lock = threading.Lock()
 
     def start(self):
+        """
+        Start the server at port 4000
+        """
         self.server_socket.bind((self.host, self.port))
         self.server_socket.listen(5)
         print(f"Server running on {self.host}:{self.port}")
@@ -26,6 +29,9 @@ class Server:
             threading.Thread(target=self.handle_client, args=(client_socket,)).start()
 
     def handle_client(self, client_socket):
+        """
+        Thread to handle client reuqests
+        """
         try:
             data = client_socket.recv(4096)
             request = pickle.loads(data)
@@ -50,16 +56,23 @@ class Server:
             client_socket.close()
 
     def list_clients(self, conn):
-        client_list = list(self.clients.keys())  # Retrieve usernames of all registered clients
+        """
+        Return a list of available and idle clients
+        """
+        # client_list = list(self.clients.keys())  # Retrieve usernames of all registered clients
+        client_list = [key for key, details in self.clients.items() if ((details.get("status")=="idle") and (details.get("active")=="True"))]
         response = {"status": "success", "clients": client_list}
         conn.send(pickle.dumps(response))
         print("Sent list of clients.")
 
     def register_client(self, client_socket, request):
+        """
+        Register a new client
+        """
         username = request["username"]
-        public_key_base64 = request["public_key"]
+        public_key_base64 = request["public_key"] # clients public key
         client_address = client_socket.getpeername()
-        listen_port = request["listen_port"]
+        listen_port = request["listen_port"] # client's listening port
         address_str = f"{client_address[0]}:{listen_port}"
 
         # Convert base64 back to PEM
@@ -68,7 +81,9 @@ class Server:
         public_key = serialization.load_pem_public_key(public_key_pem.encode('utf-8'))
 
         with self.lock:
+            # Check if username exists
             if username not in self.clients:
+                # Save the user details
                 self.clients[username] = {
                     "public_key": public_key,
                     "state": "idle",
@@ -81,6 +96,9 @@ class Server:
         client_socket.send(pickle.dumps(response))
 
     def login(self, client_socket, request):
+        """
+        Authenticate an existing user
+        """
         username = request["username"]
         with self.lock:
             if username in self.clients:
@@ -96,6 +114,9 @@ class Server:
         client_socket.send(pickle.dumps(response))
 
     def verify_login(self, client_socket, request):
+        """
+        Verify the signed challenge reply
+        """
         username = request["username"]
         signed_challenge = request["signed_challenge"]
         client_address = client_socket.getpeername()
@@ -128,13 +149,16 @@ class Server:
         client_socket.send(pickle.dumps(res))
 
     def create_session(self, client_socket, request):
+        """
+        Generate a session key between 2 clients
+        """
         # Fetch data from request body
         initiator = request["initiator"]
         target = request["target"]
         nonce = request["nonce"]
 
         with self.lock:
-            if self.clients.get(target, {}).get("state") == "idle":
+            if self.clients.get(target, {}).get("state") == "idle" and self.clients.get(target, {}).get("active") == True:
                 session_key = os.urandom(32)  # Generate a secure session key
                 initiator_key = self.clients[initiator]["public_key"]
                 target_key = self.clients[target]["public_key"]
@@ -180,6 +204,9 @@ class Server:
         client_socket.send(pickle.dumps(response))
 
     def close_session(self, client_socket, request):
+        """
+        Set client status to idle
+        """
         user = request["username"]
         res = {"status": "error"}
 
@@ -190,6 +217,9 @@ class Server:
         client_socket.send(pickle.dumps(res))
 
     def client_logoff(self, client_socket, request):
+        """
+            Set client active to False
+        """
         user = request["username"]
         res = {"status": "error"}
 
