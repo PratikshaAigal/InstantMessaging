@@ -128,22 +128,45 @@ class Server:
         client_socket.send(pickle.dumps(res))
 
     def create_session(self, client_socket, request):
+        # Fetch data from request body
         initiator = request["initiator"]
         target = request["target"]
+        nonce = request["nonce"]
 
         with self.lock:
             if self.clients.get(target, {}).get("state") == "idle":
                 session_key = os.urandom(32)  # Generate a secure session key
                 initiator_key = self.clients[initiator]["public_key"]
                 target_key = self.clients[target]["public_key"]
+
+                # Genereate tickets to both users and sign them with their respective public keys
+
+                # In the intiator ticket include the session key and their nonce to avoid replay
+                initiator_ticket_data = {
+                    "session_key": session_key,
+                    "nonce": nonce
+                }
+                serialized_initiator_ticket = pickle.dumps(initiator_ticket_data)
                 session_ticket_initiator = initiator_key.encrypt(
-                    session_key,
+                    serialized_initiator_ticket,
                     padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
                 )
+
+                # In target tickert include the session key, initiator username and their nonce to avoid replay attack
+                # Create target ticket with nonce and username embedded
+                target_ticket_data = {
+                    "session_key": session_key,
+                    "initiator": initiator,
+                    "nonce": nonce
+                }
+                serialized_target_ticket = pickle.dumps(target_ticket_data)
+
                 session_ticket_target = target_key.encrypt(
-                    session_key,
+                    serialized_target_ticket,
                     padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
                 )
+
+                # Update both the client states to busy
                 self.clients[initiator]["state"] = "busy"
                 self.clients[target]["state"] = "busy"
                 response = {

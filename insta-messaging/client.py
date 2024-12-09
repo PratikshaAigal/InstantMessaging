@@ -9,6 +9,7 @@ import base64
 import time
 from generate_keys import generate_rsa_keypair
 from cryptography.hazmat.primitives import serialization
+import os
 
 # ANSI escape codes for centering text
 LEFT_INDENT = "\x1b[1m\x1b[32m"  # Bold green for left
@@ -27,6 +28,15 @@ def format_chatbot_text_right(text, width=100):
     left_padding = width - len(text) - right_padding
     return f"{RIGHT_INDENT}{text}{' ' * right_padding}{RESET}"
 
+def generate_nonce(length=16):
+    return os.urandom(length).hex()  # Hex-encoded nonce for transmission
+
+def decrement_nonce(nonce_hex: str) -> str:
+    """
+    Decrement a nonce represented as a hex string.
+    """
+    nonce = int(nonce_hex, 16) - 1
+    return format(nonce, 'x')
 
 class Client:
     def __init__(self, username, private_key, server_host='127.0.0.1', server_port=4000,
@@ -107,24 +117,41 @@ class Client:
         return False  # Login failed
 
     def initiate_session(self, target):
+        nonce = generate_nonce()
         request = {
             "type": "session_request",
             "initiator": self.username,
-            "target": target
+            "target": target,
+            "nonce": nonce
         }
         response = self.send_request(request)
         if response["status"] == "success":
-            encrypted_key = response["session_ticket_initiator"]
+            ticket_for_me = response["session_ticket_initiator"]
             ticket_to_target = response["session_ticket_target"]
-            self.session_key = self.private_key.decrypt(
-                encrypted_key,
-                padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
+
+            # Decrypt the ticket
+            decrypted_ticket = self.private_key.decrypt(
+                ticket_for_me,
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
             )
+            # Deserialize the ticket to extract its contents
+            ticket_data = pickle.loads(decrypted_ticket)
+            self.session_key = ticket_data.get("session_key")
+            nonce_rcvd = ticket_data.get("nonce")
+
+            if nonce_rcvd != nonce:
+                print("Nonce dont match, server potentially compromised!, Exiting...")
+                exit()
+
             # Update peer host and listening port
             self.peer_host, self.peer_port = response["peer_address"].split(":")
             self.peer_port = int(self.peer_port)
 
-            peer_socket = self.forward_ticket_to_target(ticket_to_target, target)
+            peer_socket = self.forward_ticket_to_target(ticket_to_target, target, nonce)
             return peer_socket
             print(f"Session established successfully with {target}")
             # threading.Thread(target=self.listen_for_messages).start()
@@ -158,23 +185,39 @@ class Client:
 
             return False
 
-    def forward_ticket_to_target(self, ticket_to_target, target_user):
+    def forward_ticket_to_target(self, ticket_to_target, target_user, nonce):
         """Send the session ticket to the target client."""
         try:
             # Assuming the server maintains information about target clients' address/port
             # target_address = (self.peer_host, self.peer_port)
             # self.socket.connect(target_address)
+            # Create a message holding username, nonce and listening port
+            data = {
+                "listening_port": self.listen_port,
+                "user": self.username,
+                "nonce": nonce
+            }
+            serialized_data = pickle.dumps(data)
+            # encrypt the message with session key
+            encrypted_message = encrypted_message_with_iv(self.session_key, serialized_data)
+
+            # Create request body
             request_body = {
                 "type": "forward_ticket",
-                "target": target_user,
                 "ticket": ticket_to_target,
-                "listening_port": self.listen_port,
-                "user": self.username
+                "message": encrypted_message,
             }
             response, peer_socket = self.connect_to_peer(request_body)
             if response["status"] == "success":
                 print(f"Ticket forwarded to {target_user} successfully.")
-                return peer_socket
+
+                #Fetch the verification from targer
+                nonce_rcv = response["verification_nonce"]
+                decrypted_nonce = decrypt_message_with_iv(self.session_key, nonce_rcv).hex()
+                if decrement_nonce(nonce) == decrypted_nonce:
+                    return peer_socket
+                else:
+                    print("Target verification failed.")
         except Exception as e:
             print(f"Failed to forward ticket to {target_user}: {e}")
 
@@ -198,14 +241,14 @@ class Client:
                 return
 
             request = pickle.loads(data)
-            sender = request["user"]
 
             if request["type"] == "forward_ticket":
                 # Handle ticket forwarding
                 print(f"Received ticket from {addr}")
 
+                verified, sender = self.process_ticket(request, peer_socket, addr)
                 # If ticket is verified enter the chat
-                if self.process_ticket(request, peer_socket, addr):
+                if verified:
                     # Start threads for receiving and sending messages
                     print(
                         f"Session active with {sender} ({self.peer_host}:{self.peer_port}). (Enter your message or press 9 to exit)")
@@ -230,19 +273,52 @@ class Client:
         """Process the session ticket sent by the initiator."""
         try:
             ticket = request["ticket"]
-            self.session_key = self.private_key.decrypt(
+            message = request["message"]
+
+            # Decrypt and fetch data from the ticket
+            decrypted_ticket = self.private_key.decrypt(
                 ticket,
-                padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
             )
+
+            # Deserialize the ticket to extract its contents
+            ticket_data = pickle.loads(decrypted_ticket)
+            self.session_key = ticket_data.get("session_key")
+            initiator = ticket_data.get("initiator")
+            nonce_in_ticket = ticket_data.get("nonce")
+
+            # Use the session key to decrypt the message
+            decrypted_data = decrypt_message_with_iv(self.session_key, message)
+            decrypted_message = pickle.loads(decrypted_data)
+            nonce_in_request = decrypted_message["nonce"]
+            sender = decrypted_message["user"]
+
+            if (sender != initiator) and (nonce_in_ticket != nonce_in_request):
+                peer_socket.send(pickle.dumps({"status": "error"}))
+                return False
+
+            # self.session_key = self.private_key.decrypt(
+            #     ticket,
+            #     padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
+            # )
             # Update the addr as its peer addr as peer address
             self.peer_host = addr[0]
-            self.peer_port = request["listening_port"]
+            self.peer_port = decrypted_message["listening_port"]
+
+            # Step 3: Send decremented nonce by 1 encrypt it and send back to verify yourself
+            verfication_nonce = decrement_nonce(nonce_in_ticket)
+            encrypted_nonce = encrypted_message_with_iv(self.session_key, bytes.fromhex(verfication_nonce))
+
             print(f"Session established with {addr}.")
-            peer_socket.send(pickle.dumps({"status": "success"}))
-            return True
+            peer_socket.send(pickle.dumps({"status": "success", "verification_nonce": encrypted_nonce}))
+            return True, sender
         except Exception as e:
             print(f"Failed to process session ticket: {e}")
-            return False
+            return False, None
 
     def close_connection(self, peer_socket):
         """Close the current session and clean up resources."""

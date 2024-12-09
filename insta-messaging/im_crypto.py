@@ -1,4 +1,5 @@
 import hashlib
+import pickle
 from typing import Generator
 import secrets
 
@@ -85,9 +86,18 @@ if __name__ == "__main__":
     message = b"Hello, Secure World!"
 
     # Encrypt the message
-    encrypted_message = encrypted_message_with_iv(symmetric_key, iv, message)
+    encrypted_message = encrypted_message_with_iv(symmetric_key, message)
     print("Encrypted:", encrypted_message)
 
     # Decrypt the message
     decrypted_message = decrypt_message_with_iv(symmetric_key, encrypted_message)
     print("Decrypted:", decrypted_message.decode())
+
+    data = {"user": "joe", "message":"test"}
+    serialized_data = pickle.dumps(data)
+    encrypted_message = encrypted_message_with_iv(symmetric_key, serialized_data)
+    print("Encrypted:", encrypted_message)
+
+    decrypted_data = decrypt_message_with_iv(symmetric_key, encrypted_message)
+    decrypted_message = pickle.loads(decrypted_data)
+    print("Decrypted:", decrypted_message)
