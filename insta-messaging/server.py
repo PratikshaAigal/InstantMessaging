@@ -208,7 +208,6 @@ class Server:
         Set client status to idle
         """
         user = request["username"]
-        res = {"status": "error"}
 
         with self.lock:
             self.clients[user]["state"] = "idle"
@@ -221,7 +220,6 @@ class Server:
             Set client active to False
         """
         user = request["username"]
-        res = {"status": "error"}
 
         with self.lock:
             self.clients[user]["state"] = "idle"

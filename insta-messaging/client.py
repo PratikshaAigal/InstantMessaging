@@ -423,7 +423,7 @@ class Client:
                 message = decrypt_message_with_iv(self.session_key, encrypted_message).decode('utf-8')
                 # Close the connection if peer closes it
                 if message == '9':
-                    print("Connection closed by the other client.")
+                    print("Connection closed by the other client. Please enter 9 to exit")
                     break
 
                 formatted_text = format_chatbot_text_left(f"{sender}: {message}")
@@ -432,7 +432,7 @@ class Client:
                 if self.session_active:
                     print(f"Error listening to messages {e}")
                 break
-        self.close_connection(peer_socket)
+        # self.close_connection(peer_socket)
 
     def start_session(self):
         """
